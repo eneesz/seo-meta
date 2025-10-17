@@ -41,117 +41,103 @@ def trim_to_limit(text: str, max_chars: int) -> str:
     trimmed = trimmed.rstrip(",.;:- ")
     return trimmed
 
-def generate_title(brand: str, label: str, main_cat: str, cat: str, sub_cat: str) -> str:
-    """Ürün için SEO title üretir."""
-    # LLM ile zenginleştirme opsiyonu (gelecek için; şu an kapalı)
-    if USE_LLM and OPENAI_API_KEY:
-        # Örn: burada bir harici API çağrısı ile title üretilebilir.
-        pass
+# --- Yeni eklenen sabitler ve yardımcılar ---
+TRIM_TITLE_MAX = 60
+TRIM_DESC_MAX  = 155
 
-    parts = []
-    if brand:
-        parts.append(brand)
-    # label genelde zaten ürün/model adıdır
-    if label:
-        # Eğer label, brand bilgisini içermiyorsa eklenir (çoğu durumda brand ayrı sütunda veriliyor)
-        # Bu araçta brand ayrı verildiği için label direkt kullanıyoruz.
-        parts.append(label)
-    # En spesifik kategori (subCategory varsa onu, yoksa category, o da yoksa mainCategory)
-    category_name = sub_cat or cat or main_cat
-    if category_name:
-        # Kategori bilgisini küçük harfle ekle (doğal bir tanım olması için)
-        category_phrase = category_name.lower()
-        # Eğer brand+label birleşiminde kategori zaten geçiyorsa tekrarlamaya gerek yok
-        title_text = " ".join(parts)
-        if category_phrase not in title_text.lower():
-            parts.append(category_phrase)
-    title = " ".join(parts)
-    # Karakter sınırına göre kes
-    title = trim_to_limit(title, 60)
+def pick_product_type(main_cat: str, cat: str, sub_cat: str) -> str:
+    """En uygun ürün tipi adını seç (küçük harf, doğal ifade)."""
+    for c in [sub_cat, cat, main_cat]:
+        if c:
+            txt = str(c).strip()
+            if len(txt) >= 3:
+                return txt.lower()
+    return ""
+
+def smart_join(*parts):
+    """Boşları atıp tek boşlukla birleştirir."""
+    return " ".join([p.strip() for p in parts if p and str(p).strip()])
+
+def sentence_case(text: str) -> str:
+    """Cümle başını büyütür, bağırmayı önler (Türkçe karakterleri korur)."""
+    t = str(text).strip()
+    if not t:
+        return t
+    return t[0].upper() + t[1:]
+
+
+def generate_title(brand: str, label: str, main_cat: str, cat: str, sub_cat: str) -> str:
+    """
+    SEO Title stratejisi:
+    1) Zorunlu: ürün tipini açık et → (sub > cat > main)
+    2) Şablon: [Marka] [Label] [ürün tipi]
+    3) 50–60 karakter hedef; 45 altına düşerse label içi bir nitelik eklemeyi dene.
+    """
+    product_type = pick_product_type(main_cat, cat, sub_cat)
+    base = smart_join(brand, label, product_type)
+    title = trim_to_limit(base, TRIM_TITLE_MAX)
+
+    # Çok kısa kaldıysa (ör. < 48), label içinden basit bir nitelik (128 gb, 750 ml vb.) yakala
+    if len(title) < 48 and product_type:
+        m = re.search(r"\b(\d{2,4}\s?(gb|ml|l|cm|mm|w))\b", str(label).lower())
+        if m and m.group(0) not in title.lower():
+            candidate = smart_join(brand, label, m.group(0), product_type)
+            title = trim_to_limit(candidate, TRIM_TITLE_MAX)
+
     return title
 
-def generate_description(clean_details: str, brand: str, label: str, category_name: str) -> str:
-    """Ürün için SEO açıklama (description) üretir."""
-    # LLM ile zenginleştirme opsiyonu (gelecek için; şu an kapalı)
-    if USE_LLM and OPENAI_API_KEY:
-        # Örn: burada bir harici API çağrısı ile açıklama üretilebilir.
-        pass
 
-    desc = ""
-    # Eğer ürün detayı (açıklama) mevcutsa ilk cümleyi almaya çalış
+def generate_description(clean_details: str, brand: str, label: str, category_name: str) -> str:
+    """
+    Description stratejisi:
+    - Öncelik: details içindeki ilk anlamlı cümle (140–160 hedefine yakınsa onu kullan)
+    - Yoksa: tek cümlelik tarafsız-doğal şablon üret.
+    """
+    # 1) Details'tan düzgün cümle yakala
     if clean_details:
-        # Noktaya göre cümleleri ayır
-        sentences = [s.strip() for s in clean_details.split('.') if s.strip()]
+        sentences = [s.strip() for s in re.split(r"[\.!\?]+", clean_details) if s.strip()]
         if sentences:
-            # İlk cümleyi al
-            desc = sentences[0]
-            # Eğer ilk cümle çok kısaysa (140 karakterden az) ve ikinci cümle varsa, onu da ekle
-            if len(desc) < 140 and len(sentences) > 1:
-                # İki cümleyi birleştirirken araya nokta ekleyip toplamı kontrol edeceğiz
-                combined = desc + ". " + sentences[1]
-                if len(combined) <= 160:
-                    desc = combined
-                else:
-                    # İkinci cümleyi eklerken 160'ı aşıyorsa, ilk cümleye yakın bir uzunlukta tutarız
-                    desc = trim_to_limit(combined, 160)
-    # Eğer detayı yoksa ya da uygun cümle bulunamadıysa, basit bir cümle oluştur
-    if not desc:
-        # Marka + ürün adı + kategoriye dayalı basit bir tanım
-        desc_components = []
-        if brand:
-            desc_components.append(brand)
-        if label:
-            desc_components.append(label)
-        if category_name:
-            desc_components.append(category_name.lower())
-        # Örneğin: "Apple iPhone 14 Pro Max akıllı telefon"
-        base = " ".join(desc_components)
-        if base:
-            desc = base
-            # Ürün tipi cümle formunda değilse sonuna bir fiil tabanlı ifade ekleyebiliriz
-            # (örneğin "yüksek performans sunar" gibi) ancak verimiz yoksa eklemiyoruz.
-            # Bu noktada sadece temel bir tanım veriyoruz.
-    # Trim description to 155 chars limit
-    desc = trim_to_limit(desc, 155)
-    return desc
+            cand = sentence_case(sentences[0])
+            cand = trim_to_limit(cand, TRIM_DESC_MAX)
+            if len(cand) >= 120:  # hedefe yakınsa bunu kullan
+                return cand
+
+    # 2) Şablon üret
+    product_type = (category_name or "").lower().strip()
+    base = smart_join(brand, label, product_type)
+    if product_type:
+        sent = f"{sentence_case(base)}. Günlük kullanıma uygun, net ve pratik bir seçimdir."
+    else:
+        sent = f"{sentence_case(smart_join(brand, label))} ile ihtiyacınızı karşılayan pratik bir çözümdür."
+    return trim_to_limit(sent, TRIM_DESC_MAX)
+
 
 def generate_keywords(brand: str, label: str, main_cat: str, cat: str, sub_cat: str, details_text: str) -> str:
-    """Ürün için anahtar kelimeler (keywords) listesi üretir."""
-    keywords = []
-    # 1. Marka + model/ürün adı
+    """
+    2–3 anlamlı anahtar kelime:
+    1) Marka + Label
+    2) Ürün tipi (sub/category/main)
+    3) Label içinden kapasite/numara gibi bir nitelik (varsa)
+    """
+    kws = []
     if brand and label:
-        keywords.append(f"{brand} {label}")
-    elif brand:
-        keywords.append(brand)
-    elif label:
-        keywords.append(label)
-    # 2. En spesifik kategori (lowercase, doğal bir terim olarak)
-    category_name = sub_cat or cat or main_cat
-    if category_name:
-        kw_cat = category_name.lower()
-        # Marka+model içerisinde kategori kelimesi yoksa ekle
-        if kw_cat not in " ".join(keywords).lower():
-            keywords.append(kw_cat)
-    # 3. Önemli görülen bir özellik (örn. teknik özellik) varsa ekle
-    # Basit yaklaşım: details içinde "GB" gibi kapasite birimi geçiyorsa onu anahtar kelime say
-    if details_text:
-        text_lower = details_text.lower()
-        # Örnek kontrol: depolama kapasitesi
-        if " gb" in text_lower:
-            # '128 gb' gibi bir kısmı ayıkla
-            idx = text_lower.find(" gb")
-            if idx != -1:
-                # Boşluk dahil " gb" bulundu, öncesindeki sayı ile birlikte alalım
-                start = idx
-                # Geriye doğru rakamları al
-                while start > 0 and text_lower[start-1].isdigit():
-                    start -= 1
-                capacity = details_text[start: idx+3].strip()  # orijinal metinden al, büyük/küçük koru
-                if capacity and capacity not in keywords:
-                    keywords.append(capacity)
-    # Sadece 2-3 anahtar kelime kullan (fazlaysa kırp)
-    keywords = keywords[:3]
-    return ", ".join(keywords)
+        kws.append(f"{brand} {label}")
+    else:
+        if brand: kws.append(brand)
+        if label: kws.append(label)
+
+    product_type = pick_product_type(main_cat, cat, sub_cat)
+    if product_type and product_type not in " ".join(kws).lower():
+        kws.append(product_type)
+
+    m = re.search(r"\b(\d{2,4}\s?(gb|ml|l|cm|mm|w))\b", str(label).lower())
+    if m:
+        val = m.group(0)
+        if not any(val in k.lower() for k in kws):
+            kws.append(val)
+
+    return ", ".join(kws[:3])
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
