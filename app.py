@@ -9,7 +9,8 @@ app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
 # LLM kullanım bayrağı (varsayılan kapalı, ileride OPENAI_API_KEY varsa kullanılabilir)
-USE_LLM = False
+USE_LLM = True  # LLM katmanını AKTİF et
+LLM_MODEL = "gpt-4o-mini"  # hızlı/ekonomik iyi kalite
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # HTML tag'leri temizlemek için regex deseni (ör. <br>, <p> vb. hepsini kaldırır)
@@ -40,6 +41,84 @@ def trim_to_limit(text: str, max_chars: int) -> str:
     # Sondaki eksik noktalama işaretlerini temizle (virgül, nokta vb.)
     trimmed = trimmed.rstrip(",.;:- ")
     return trimmed
+
+# --- LLM katmanı: OpenAI ---
+def llm_generate_meta(brand: str, label: str, main_cat: str, cat: str, sub_cat: str, clean_details: str):
+    """
+    OpenAI'den title/description/keywords üretir.
+    - Her zaman Türkçe, ama özel isimler (brand/label) orijinal haliyle korunur.
+    - Uzunlukları biz tekrar trim ederiz.
+    Hata olursa None döndürür, biz de rule-based'e düşeriz.
+    """
+    try:
+        if not OPENAI_API_KEY:
+            return None
+
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
+        category_name = (sub_cat or cat or main_cat or "").strip()
+
+        system_msg = (
+            "Sen deneyimli bir SEO içerik editörüsün. Türkçe, akıcı, devriksiz yaz.\n"
+            "Özel isimleri (brand, label) asla çevirme veya bozma. Tümü büyük harften kaçın.\n"
+            "ÇIKTIYI SADECE JSON olarak döndür: {\"title\":\"...\",\"description\":\"...\",\"keywords\":[\"...\",\"...\"]}"
+        )
+
+        user_msg = f"""
+Veriler (yalnız satırdan gelenleri kullan):
+- Marka (brand): {brand or ""}
+- Etiket/Model (label): {label or ""}
+- Kategori ana/alt (main/category/sub): {main_cat or ""} / {cat or ""} / {sub_cat or ""}
+- Detay (HTML temiz): {clean_details or ""}
+
+Kurallar:
+- Title: 50–60 karakter hedef; ürün tipini açık et (örn. akıllı telefon / koşu ayakkabısı / şampuan ...).
+  Şablon esnek: [Marka] [Label] [ürün tipi veya anlamlı nitelik].
+  Kelime ortasında kesme, üç nokta yok.
+- Description: 140–160 karakter, tek cümle (en fazla iki kısa cümle). Doğal, tarafsız, devriksiz.
+- Keywords: 2–3 anlamlı anahtar (örn. 'Apple iPhone 14 Pro Max', 'akıllı telefon', '128 gb' gibi).
+- Alan dışı varsayım yapma. Ürün tipini satırdaki kategori adlarından türet.
+- Eğer veriler yetersizse sade ve genel ama doğal bir cümle kur.
+"""
+        # Yeni SDK: responses.create yerine chat.completions.create da olur;
+        # ama v1 API'de responses stabil.
+        resp = client.responses.create(
+            model=LLM_MODEL,
+            input=[
+                {"role":"system", "content":system_msg},
+                {"role":"user", "content":user_msg}
+            ],
+            temperature=0.4,  # daha tutarlı
+        )
+
+        # İçerik al
+        content = resp.output_text
+        import json
+        data = json.loads(content)
+
+        # Güvenlik: alanlar yoksa None
+        title = str(data.get("title","")).strip()
+        desc = str(data.get("description","")).strip()
+        kws  = data.get("keywords", [])
+        if isinstance(kws, list):
+            keywords = ", ".join([str(x).strip() for x in kws if str(x).strip()])[:200]
+        else:
+            keywords = str(kws).strip()
+
+        # Son kez bizim kurallarla trimle
+        title = trim_to_limit(title, 60)
+        desc  = trim_to_limit(desc, 155)
+
+        # Çok kısa/bozuksa None döndür (fallback devreye girsin)
+        if len(title) < 45 or len(desc) < 120 or not keywords:
+            return None
+
+        return {"title": title, "description": desc, "keywords": keywords}
+
+    except Exception:
+        return None
+
 
 # --- Yeni eklenen sabitler ve yardımcılar ---
 TRIM_TITLE_MAX = 60
@@ -178,6 +257,28 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
     for col in meta_cols:
         if col not in df.columns:
             df[col] = ""  # yeni sütun ekle
+
+    # Meta alanları üret
+        new_title = ""
+        new_desc = ""
+        new_keywords = ""
+
+        # 1) LLM denemesi (sadece ana ürün ve hücreler boşsa)
+        if USE_LLM and OPENAI_API_KEY:
+            llm_out = llm_generate_meta(brand, label, main_cat, cat, sub_cat, details_text)
+            if llm_out:
+                new_title = llm_out["title"]
+                new_desc = llm_out["description"]
+                new_keywords = llm_out["keywords"]
+
+        # 2) LLM başarısız/uygunsuzsa rule-based'e düş
+        if not new_title or not new_desc or not new_keywords:
+            new_title = generate_title(brand, label, main_cat, cat, sub_cat)
+            category_name = sub_cat or cat or main_cat
+            new_desc = generate_description(details_text, brand, label, category_name)
+            new_keywords = generate_keywords(brand, label, main_cat, cat, sub_cat, details_text)
+
+
     # 5. Satırları işle ve meta alanları doldur
     for idx, row in df.iterrows():
         try:
