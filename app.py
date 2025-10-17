@@ -1,128 +1,67 @@
+# -*- coding: utf-8 -*-
+# FastAPI + pandas tabanlı: Excel → SEO Meta Üretici
+# Notlar:
+# - Yalnızca .xlsx kabul eder
+# - Zorunlu sütunlar yoksa kullanıcıya anlamlı hata döner
+# - Sadece ana ürünler (rootProductStockCode == 0) işlenir
+# - Dolu title/description/keywords hücreleri asla üzerine yazılmaz
+# - Sonuna title/description/keywords sütunlarını ekler (yoksa yaratır)
+# - OPENAI_API_KEY varsa LLM (gpt-4o-mini) ile üretim yapılır; yoksa kural tabanlı
+# - Render/Heroku vb. için Start: uvicorn app:app --host 0.0.0.0 --port $PORT
+
 from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 import pandas as pd
-import io, re, os 
+import io
+import os
+import re
 from html import unescape
+from typing import Optional
 
-app = FastAPI()
+# -----------------------------------------------------------------------------
+# UYGULAMA
+# -----------------------------------------------------------------------------
+app = FastAPI(title="Excel → SEO Meta Üretici")
 templates = Jinja2Templates(directory="templates")
 
-# LLM kullanım bayrağı (varsayılan kapalı, ileride OPENAI_API_KEY varsa kullanılabilir)
-USE_LLM = True  # LLM katmanını AKTİF et
-LLM_MODEL = "gpt-4o-mini"  # hızlı/ekonomik iyi kalite
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# LLM bayrağı: OPENAI_API_KEY varsa otomatik True olur
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+USE_LLM = bool(OPENAI_API_KEY)
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")  # hızlı/ekonomik iyi kalite
 
-# HTML tag'leri temizlemek için regex deseni (ör. <br>, <p> vb. hepsini kaldırır)
-TAG_RE = re.compile(r'<[^>]+>')
+# HTML tag temizleyici
+TAG_RE = re.compile(r"<[^>]+>")
 
+# -----------------------------------------------------------------------------
+# Yardımcı fonksiyonlar
+# -----------------------------------------------------------------------------
 def clean_html(raw_html: str) -> str:
     """Ürün detayı HTML içeriğini düz metne çevirir."""
     if not raw_html:
         return ""
-    # HTML taglerini kaldır
-    text = TAG_RE.sub('', raw_html)  # HTML etiketlerini siler:contentReference[oaicite:11]{index=11}
-    # HTML entity'lerini dönüştür (örn &amp; -> & , &nbsp; -> boşluk)
+    text = TAG_RE.sub("", str(raw_html))
     text = unescape(text)
-    # Beyazlukları normalleştir: fazla boşlukları tek boşluk yap, baş/son boşlukları kırp
-    text = ' '.join(text.split())
+    # Çoklu boşluk/kaçışları normalize et
+    text = " ".join(text.split())
     return text.strip()
 
 def trim_to_limit(text: str, max_chars: int) -> str:
-    """Metni max_chars sınırında kelime bütünlüğünü koruyarak keser."""
+    """Metni kelime bütünlüğünü koruyarak keser; üç nokta eklemez."""
+    text = (text or "").strip()
     if len(text) <= max_chars:
         return text
-    # max_chars sınırını aşmışsa, max_chars+1 uzunluğuna kadar alıp son boşluğun konumunu bul
-    cut_off_index = text[:max_chars+1].rfind(" ")
+    cut_off_index = text[: max_chars + 1].rfind(" ")
     if cut_off_index == -1:
-        # Hiç boşluk bulunamadıysa direkt max_chars sınırında kes
         cut_off_index = max_chars
     trimmed = text[:cut_off_index]
-    # Sondaki eksik noktalama işaretlerini temizle (virgül, nokta vb.)
+    # Sonda kalan eksik noktalama/boşlukları temizle
     trimmed = trimmed.rstrip(",.;:- ")
     return trimmed
 
-# --- LLM katmanı: OpenAI ---
-def llm_generate_meta(brand: str, label: str, main_cat: str, cat: str, sub_cat: str, clean_details: str):
-    """
-    OpenAI'den title/description/keywords üretir.
-    - Her zaman Türkçe, ama özel isimler (brand/label) orijinal haliyle korunur.
-    - Uzunlukları biz tekrar trim ederiz.
-    Hata olursa None döndürür, biz de rule-based'e düşeriz.
-    """
-    try:
-        if not OPENAI_API_KEY:
-            return None
-
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_API_KEY)
-
-        category_name = (sub_cat or cat or main_cat or "").strip()
-
-        system_msg = (
-            "Sen deneyimli bir SEO içerik editörüsün. Türkçe, akıcı, devriksiz yaz.\n"
-            "Özel isimleri (brand, label) asla çevirme veya bozma. Tümü büyük harften kaçın.\n"
-            "ÇIKTIYI SADECE JSON olarak döndür: {\"title\":\"...\",\"description\":\"...\",\"keywords\":[\"...\",\"...\"]}"
-        )
-
-        user_msg = f"""
-Veriler (yalnız satırdan gelenleri kullan):
-- Marka (brand): {brand or ""}
-- Etiket/Model (label): {label or ""}
-- Kategori ana/alt (main/category/sub): {main_cat or ""} / {cat or ""} / {sub_cat or ""}
-- Detay (HTML temiz): {clean_details or ""}
-
-Kurallar:
-- Title: 50–60 karakter hedef; ürün tipini açık et (örn. akıllı telefon / koşu ayakkabısı / şampuan ...).
-  Şablon esnek: [Marka] [Label] [ürün tipi veya anlamlı nitelik].
-  Kelime ortasında kesme, üç nokta yok.
-- Description: 140–160 karakter, tek cümle (en fazla iki kısa cümle). Doğal, tarafsız, devriksiz.
-- Keywords: 2–3 anlamlı anahtar (örn. 'Apple iPhone 14 Pro Max', 'akıllı telefon', '128 gb' gibi).
-- Alan dışı varsayım yapma. Ürün tipini satırdaki kategori adlarından türet.
-- Eğer veriler yetersizse sade ve genel ama doğal bir cümle kur.
-"""
-        # Yeni SDK: responses.create yerine chat.completions.create da olur;
-        # ama v1 API'de responses stabil.
-        resp = client.responses.create(
-            model=LLM_MODEL,
-            input=[
-                {"role":"system", "content":system_msg},
-                {"role":"user", "content":user_msg}
-            ],
-            temperature=0.4,  # daha tutarlı
-        )
-
-        # İçerik al
-        content = resp.output_text
-        import json
-        data = json.loads(content)
-
-        # Güvenlik: alanlar yoksa None
-        title = str(data.get("title","")).strip()
-        desc = str(data.get("description","")).strip()
-        kws  = data.get("keywords", [])
-        if isinstance(kws, list):
-            keywords = ", ".join([str(x).strip() for x in kws if str(x).strip()])[:200]
-        else:
-            keywords = str(kws).strip()
-
-        # Son kez bizim kurallarla trimle
-        title = trim_to_limit(title, 60)
-        desc  = trim_to_limit(desc, 155)
-
-        # Çok kısa/bozuksa None döndür (fallback devreye girsin)
-        if len(title) < 45 or len(desc) < 120 or not keywords:
-            return None
-
-        return {"title": title, "description": desc, "keywords": keywords}
-
-    except Exception:
-        return None
-
-
 # --- Yeni eklenen sabitler ve yardımcılar ---
 TRIM_TITLE_MAX = 60
-TRIM_DESC_MAX  = 155
+TRIM_DESC_MAX = 155
 
 def pick_product_type(main_cat: str, cat: str, sub_cat: str) -> str:
     """En uygun ürün tipi adını seç (küçük harf, doğal ifade)."""
@@ -135,16 +74,18 @@ def pick_product_type(main_cat: str, cat: str, sub_cat: str) -> str:
 
 def smart_join(*parts):
     """Boşları atıp tek boşlukla birleştirir."""
-    return " ".join([p.strip() for p in parts if p and str(p).strip()])
+    return " ".join([str(p).strip() for p in parts if p and str(p).strip()])
 
 def sentence_case(text: str) -> str:
     """Cümle başını büyütür, bağırmayı önler (Türkçe karakterleri korur)."""
-    t = str(text).strip()
+    t = str(text or "").strip()
     if not t:
         return t
     return t[0].upper() + t[1:]
 
-
+# -----------------------------------------------------------------------------
+# Kural tabanlı üretim
+# -----------------------------------------------------------------------------
 def generate_title(brand: str, label: str, main_cat: str, cat: str, sub_cat: str) -> str:
     """
     SEO Title stratejisi:
@@ -164,7 +105,6 @@ def generate_title(brand: str, label: str, main_cat: str, cat: str, sub_cat: str
             title = trim_to_limit(candidate, TRIM_TITLE_MAX)
 
     return title
-
 
 def generate_description(clean_details: str, brand: str, label: str, category_name: str) -> str:
     """
@@ -190,7 +130,6 @@ def generate_description(clean_details: str, brand: str, label: str, category_na
         sent = f"{sentence_case(smart_join(brand, label))} ile ihtiyacınızı karşılayan pratik bir çözümdür."
     return trim_to_limit(sent, TRIM_DESC_MAX)
 
-
 def generate_keywords(brand: str, label: str, main_cat: str, cat: str, sub_cat: str, details_text: str) -> str:
     """
     2–3 anlamlı anahtar kelime:
@@ -202,8 +141,10 @@ def generate_keywords(brand: str, label: str, main_cat: str, cat: str, sub_cat: 
     if brand and label:
         kws.append(f"{brand} {label}")
     else:
-        if brand: kws.append(brand)
-        if label: kws.append(label)
+        if brand:
+            kws.append(brand)
+        if label:
+            kws.append(label)
 
     product_type = pick_product_type(main_cat, cat, sub_cat)
     if product_type and product_type not in " ".join(kws).lower():
@@ -217,117 +158,199 @@ def generate_keywords(brand: str, label: str, main_cat: str, cat: str, sub_cat: 
 
     return ", ".join(kws[:3])
 
+# -----------------------------------------------------------------------------
+# LLM katmanı (opsiyonel)
+# -----------------------------------------------------------------------------
+def llm_generate_meta(
+    brand: str, label: str, main_cat: str, cat: str, sub_cat: str, clean_details: str
+) -> Optional[dict]:
+    """OpenAI'den title/description/keywords üretir. Hata/uygunsuzsa None döner."""
+    if not USE_LLM or not OPENAI_API_KEY:
+        return None
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
 
+        category_name = (sub_cat or cat or main_cat or "").strip()
+
+        system_msg = (
+            "Sen deneyimli bir SEO editörüsün. Türkçe, akıcı, devriksiz yaz. "
+            "Özel isimleri (brand, label) asla çevirme; tamamen büyük harf kullanma. "
+            'ÇIKTIYI SADECE JSON döndür: {"title":"...","description":"...","keywords":["...","..."]}'
+        )
+        user_msg = f"""
+Veriler (yalnız satırdan beslen):
+- brand: {brand or ""}
+- label: {label or ""}
+- main/category/sub: {main_cat or ""} / {cat or ""} / {sub_cat or ""}
+- details (HTML temiz): {clean_details or ""}
+
+Kurallar:
+- Title: 50–60 karakter hedef; ürün tipini açık et (örn. akıllı telefon / koşu ayakkabısı / şampuan).
+  Şablon esnek: [Marka] [Label] [ürün tipi veya anlamlı nitelik].
+  Kelime ortasında kesme yok, üç nokta yok.
+- Description: 140–160 karakter, tek cümle (en fazla iki kısa cümle). Doğal ve tarafsız.
+- Keywords: 2–3 anlamlı anahtar (örn. 'Apple iPhone 14 Pro Max', 'akıllı telefon', '128 gb').
+- Alan dışı varsayım yapma; ürün tipini kategori adlarından türet.
+"""
+        resp = client.responses.create(
+            model=LLM_MODEL,
+            input=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.4,
+        )
+        content = resp.output_text
+
+        import json
+        data = json.loads(content)
+
+        title = trim_to_limit(str(data.get("title", "")).strip(), TRIM_TITLE_MAX)
+        desc = trim_to_limit(str(data.get("description", "")).strip(), TRIM_DESC_MAX)
+        kws = data.get("keywords", [])
+        if isinstance(kws, list):
+            keywords = ", ".join([str(x).strip() for x in kws if str(x).strip()])[:200]
+        else:
+            keywords = str(kws).strip()
+
+        # Basit kalite kontrol: çok kısa ise fallback'e izin ver
+        if len(title) < 45 or len(desc) < 120 or not keywords:
+            return None
+
+        return {"title": title, "description": desc, "keywords": keywords}
+    except Exception:
+        # LLM'de hata olursa sessizce kural tabanlıya düşeceğiz
+        return None
+
+# -----------------------------------------------------------------------------
+# Rotalar
+# -----------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Form sayfasını döndürür."""
     return templates.TemplateResponse("index.html", {"request": request})
 
+@app.get("/health", response_class=HTMLResponse)
+async def health():
+    return HTMLResponse("ok")
+
 @app.post("/upload", response_class=HTMLResponse)
 async def upload_file(request: Request, file: UploadFile = File(...)):
-    """Excel dosyasını alır, işler ve sonucu indirmeye hazırlar."""
-    # 1. Dosya tipi doğrulama
-    filename = file.filename
-    if not filename.lower().endswith(".xlsx"):
-        error_msg = "Lütfen .xlsx formatında bir Excel dosyası yükleyin."
-        return templates.TemplateResponse("index.html", {"request": request, "error": error_msg})
-    # 2. Excel'i oku
+    """
+    Excel dosyasını alır, işler ve sonucu indirmeye hazırlar.
+    Hata durumunda sayfayı anlamlı mesajla döndürür (500 yerine).
+    """
+    # 1) Dosya tipi doğrulama
     try:
-        # Dosyayı bellek içine okuyup pandas ile DataFrame'e çeviriyoruz
+        filename = file.filename or ""
+        if not filename.lower().endswith(".xlsx"):
+            return templates.TemplateResponse(
+                "index.html",
+                {"request": request, "error": "Lütfen .xlsx formatında bir Excel dosyası yükleyin."},
+            )
+    except Exception:
+        return templates.TemplateResponse(
+            "index.html",
+            {"request": request, "error": "Dosya okunamadı. Tekrar deneyin."},
+        )
+
+    # 2) Excel'i oku
+    try:
         content = await file.read()
         excel_data = io.BytesIO(content)
         df = pd.read_excel(excel_data, engine="openpyxl")
     except Exception as e:
-        error_msg = f"Dosya okunamadı: {e}"
-        return templates.TemplateResponse("index.html", {"request": request, "error": error_msg})
-    # 3. Gerekli sütunların kontrolü
+        return templates.TemplateResponse(
+            "index.html",
+            {"request": request, "error": f"Dosya okunamadı: {e}"},
+        )
+
+    # 3) Gerekli sütunlar
     required_columns = ["label", "brand", "mainCategory", "rootProductStockCode"]
     missing = [col for col in required_columns if col not in df.columns]
     if missing:
-        error_msg = "Eksik sütunlar: " + ", ".join(missing)
-        return templates.TemplateResponse("index.html", {"request": request, "error": error_msg})
-    # Opsiyonel sütunlardan mevcut olanları al
+        return templates.TemplateResponse(
+            "index.html",
+            {"request": request, "error": "Eksik sütun(lar): " + ", ".join(missing)},
+        )
+
+    # opsiyonel details sütunu isim varyantları
     details_col = None
-    for col in ["details", "detail", "description", "aciklama"]:  # farklı isim varyasyonları kontrol
+    for col in ["details", "detail", "description", "aciklama", "urun_detayi", "urunDetayi"]:
         if col in df.columns:
             details_col = col
             break
-    # 4. Mevcut meta sütunları kontrol et, yoksa ekle
-    meta_cols = ["title", "description", "keywords"]
-    for col in meta_cols:
-        if col not in df.columns:
-            df[col] = ""  # yeni sütun ekle
 
-    # Meta alanları üret
+    # 4) Meta sütunlarını hazırla
+    for col in ["title", "description", "keywords"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    # 5) Satırları işle
+    for idx, row in df.iterrows():
+        # Sadece ana ürünler
+        try:
+            if pd.isna(row["rootProductStockCode"]) or row["rootProductStockCode"] != 0:
+                continue
+        except Exception:
+            continue
+
+        # Dolu hücre varsa dokunma
+        current_title = str(row["title"]) if "title" in df.columns and not pd.isna(row["title"]) else ""
+        current_desc = str(row["description"]) if "description" in df.columns and not pd.isna(row["description"]) else ""
+        current_keywords = str(row["keywords"]) if "keywords" in df.columns and not pd.isna(row["keywords"]) else ""
+        if current_title or current_desc or current_keywords:
+            continue
+
+        # Alanları topla
+        brand = str(row["brand"]) if not pd.isna(row["brand"]) else ""
+        label = str(row["label"]) if not pd.isna(row["label"]) else ""
+        main_cat = str(row["mainCategory"]) if not pd.isna(row["mainCategory"]) else ""
+        cat = str(row["category"]) if "category" in df.columns and not pd.isna(row["category"]) else ""
+        sub_cat = str(row["subCategory"]) if "subCategory" in df.columns and not pd.isna(row["subCategory"]) else ""
+
+        details_text = ""
+        if details_col:
+            raw_details = str(row[details_col]) if not pd.isna(row[details_col]) else ""
+            details_text = clean_html(raw_details)
+
+        # 1) LLM dene
         new_title = ""
         new_desc = ""
         new_keywords = ""
+        llm_out = llm_generate_meta(brand, label, main_cat, cat, sub_cat, details_text)
+        if llm_out:
+            new_title = llm_out["title"]
+            new_desc = llm_out["description"]
+            new_keywords = llm_out["keywords"]
 
-        # 1) LLM denemesi (sadece ana ürün ve hücreler boşsa)
-        if USE_LLM and OPENAI_API_KEY:
-            llm_out = llm_generate_meta(brand, label, main_cat, cat, sub_cat, details_text)
-            if llm_out:
-                new_title = llm_out["title"]
-                new_desc = llm_out["description"]
-                new_keywords = llm_out["keywords"]
-
-        # 2) LLM başarısız/uygunsuzsa rule-based'e düş
+        # 2) LLM başarısızsa kural tabanlı üret
         if not new_title or not new_desc or not new_keywords:
             new_title = generate_title(brand, label, main_cat, cat, sub_cat)
             category_name = sub_cat or cat or main_cat
             new_desc = generate_description(details_text, brand, label, category_name)
             new_keywords = generate_keywords(brand, label, main_cat, cat, sub_cat, details_text)
 
-
-    # 5. Satırları işle ve meta alanları doldur
-    for idx, row in df.iterrows():
-        try:
-            # Sadece ana ürün (rootProductStockCode == 0) satırları işlenecek
-            if pd.isna(row["rootProductStockCode"]) or row["rootProductStockCode"] != 0:
-                continue  # varyant veya geçersiz değer, meta üretmiyoruz
-        except KeyError:
-            # rootProductStockCode yoksa (beklenmedik durum), o satırı atla
-            continue
-        # Title, Description, Keywords zaten dolu ise atla (değiştirme)
-        current_title = str(row["title"]) if not pd.isna(row["title"]) else ""
-        current_desc = str(row["description"]) if not pd.isna(row["description"]) else ""
-        current_keywords = str(row["keywords"]) if not pd.isna(row["keywords"]) else ""
-        if current_title or current_desc or current_keywords:
-            # Bu ana ürün satırında herhangi bir meta alan önceden doldurulmuşsa, dokunmuyoruz
-            continue
-        # Gerekli temel alanları al
-        brand = str(row["brand"]) if not pd.isna(row["brand"]) else ""
-        label = str(row["label"]) if not pd.isna(row["label"]) else ""
-        main_cat = str(row["mainCategory"]) if not pd.isna(row["mainCategory"]) else ""
-        cat = str(row["category"]) if "category" in row and not pd.isna(row["category"]) else ""
-        sub_cat = str(row["subCategory"]) if "subCategory" in row and not pd.isna(row["subCategory"]) else ""
-        # Ürün detayını temizle (HTML'den arındır)
-        details_text = ""
-        if details_col:
-            raw_details = str(row[details_col]) if not pd.isna(row[details_col]) else ""
-            details_text = clean_html(raw_details)
-        # Meta alanları üret
-        new_title = generate_title(brand, label, main_cat, cat, sub_cat)
-        # Title içerisinde anahtar kategori kelimesi varsa, description için kategori adını o olarak kullanabiliriz
-        category_name = sub_cat or cat or main_cat
-        new_desc = generate_description(details_text, brand, label, category_name)
-        new_keywords = generate_keywords(brand, label, main_cat, cat, sub_cat, details_text)
         # DataFrame'e yaz
         df.at[idx, "title"] = new_title
         df.at[idx, "description"] = new_desc
         df.at[idx, "keywords"] = new_keywords
-    # 6. DataFrame'i Excel olarak çıktıya hazırla
-    # Belleğe yaz
-    output_buffer = io.BytesIO()
-    with pd.ExcelWriter(output_buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
-    output_buffer.seek(0)
-    # İndirme için dosya adı (orijinal isme _seo eki eklenebilir)
-    out_name = filename
-    if out_name.lower().endswith(".xlsx"):
-        out_name = out_name[:-5] + "_seo.xlsx"
-    else:
-        out_name = out_name + "_seo.xlsx"
-    # 7. Excel dosyasını yanıt olarak döndür (indirme başlat)
-    return StreamingResponse(output_buffer, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                              headers={"Content-Disposition": f"attachment; filename={out_name}"})
+
+    # 6) Excel'i bellekten döndür
+    try:
+        output_buffer = io.BytesIO()
+        with pd.ExcelWriter(output_buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False)
+        output_buffer.seek(0)
+        out_name = filename[:-5] + "_seo.xlsx" if filename.lower().endswith(".xlsx") else filename + "_seo.xlsx"
+        return StreamingResponse(
+            output_buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={out_name}"},
+        )
+    except Exception as e:
+        return templates.TemplateResponse(
+            "index.html",
+            {"request": request, "error": f"Çıktı oluşturulamadı: {e}"},
+        )
