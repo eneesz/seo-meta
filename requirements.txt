@@ -4,4 +4,4 @@ pandas
 openpyxl
 python-multipart
 jinja2
- 
+openai>=1.30.0
