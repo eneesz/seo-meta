@@ -1,30 +1,242 @@
 <!DOCTYPE html>
 <html lang="tr">
-<head> 
+<head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Excel → SEO Meta Araç</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Excel → SEO Meta Üretici</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 2em; text-align: center; }
-    form { margin: 2em auto; max-width: 400px; }
-    input[type=file] { display: block; margin: 1em auto; }
-    .message { margin-top: 1em; font-weight: bold; }
-    .error { color: #d00; }
-    .success { color: #070; }
+    :root{
+      --bg:#0f1115;        /* koyu ama yumuşak */
+      --card:#151923;
+      --txt:#e8ebf1;
+      --muted:#9aa3b2;
+      --primary:#6ea8fe;   /* sade vurgu */
+      --accent:#8be0c7;
+      --danger:#ff6b6b;
+      --ok:#32d296;
+      --border:rgba(255,255,255,0.08);
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial;
+      background: radial-gradient(1200px 800px at 100% -10%, #1b2232 0%, var(--bg) 60%);
+      color:var(--txt);
+      display:flex; align-items:center; justify-content:center; padding:24px;
+    }
+    .wrap{width:100%; max-width:860px}
+    header{margin-bottom:18px; text-align:center}
+    header h1{margin:0 0 8px; font-weight:700; letter-spacing:.2px}
+    header p{margin:0; color:var(--muted); font-size:14px}
+
+    .card{
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.08));
+      border:1px solid var(--border);
+      border-radius:16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+      padding:18px;
+    }
+
+    .drop{
+      border:1.5px dashed rgba(255,255,255,.15);
+      border-radius:14px;
+      padding:26px;
+      text-align:center;
+      transition: all .18s ease;
+      background: rgba(255,255,255,0.02);
+    }
+    .drop:hover{border-color: rgba(255,255,255,.25)}
+    .drop.dragover{
+      border-color: var(--primary);
+      background: rgba(110,168,254,0.06);
+      transform: translateY(-1px);
+      box-shadow: 0 8px 20px rgba(110,168,254,.12);
+    }
+
+    .icon{
+      width:56px; height:56px; margin:4px auto 10px;
+      display:block; opacity:.9; filter: drop-shadow(0 4px 10px rgba(0,0,0,.25));
+    }
+    .title{
+      font-size:18px; font-weight:600; margin:0 0 6px;
+    }
+    .hint{
+      color:var(--muted); font-size:13px; margin:0 0 14px;
+    }
+
+    .btns{display:flex; gap:10px; justify-content:center; flex-wrap:wrap}
+    .btn{
+      appearance:none; border:1px solid var(--border);
+      background:#1b2130; color:var(--txt);
+      padding:10px 14px; border-radius:10px; cursor:pointer;
+      font-weight:600; letter-spacing:.2px;
+      transition: all .15s ease;
+    }
+    .btn:hover{transform:translateY(-1px); border-color: rgba(255,255,255,.25)}
+    .btn.primary{background: linear-gradient(180deg, #243250, #1b2740); border-color: rgba(110,168,254,.35)}
+    .btn.primary:hover{box-shadow: 0 8px 18px rgba(110,168,254,.18)}
+    .btn:disabled{opacity:.6; cursor:not-allowed; transform:none}
+
+    .meta{display:flex; justify-content:space-between; gap:12px; margin-top:12px; color:var(--muted); font-size:12px}
+    .meta div{flex:1; text-align:center}
+    .error, .success{
+      margin-top:12px; padding:10px 12px; border-radius:10px; font-size:14px;
+      border:1px solid var(--border);
+    }
+    .error{color:#ffd2d2; background:rgba(255,107,107,.08); border-color: rgba(255,107,107,.35)}
+    .success{color:#d4ffe9; background:rgba(50,210,150,.08); border-color: rgba(50,210,150,.35)}
+
+    .hidden{display:none}
+    .spinner{
+      width:18px; height:18px; border:2px solid rgba(255,255,255,.25);
+      border-top-color:var(--accent); border-radius:50%; display:inline-block;
+      animation:spin .9s linear infinite; vertical-align:middle; margin-right:8px;
+    }
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    footer{margin-top:14px; text-align:center; color:var(--muted); font-size:12px}
+    a.link{color:var(--primary); text-decoration:none}
+    a.link:hover{text-decoration:underline}
+
+    @media (max-width:540px){
+      .title{font-size:16px}
+      .icon{width:48px; height:48px}
+      .btn{width:100%}
+      .meta{flex-direction:column}
+    }
   </style>
 </head>
 <body>
-  <h1>Excel → SEO Meta Üretici</h1>
-  <form action="/upload" method="post" enctype="multipart/form-data">
-    <input type="file" name="file" accept=".xlsx" required />
-    <button type="submit">İşle</button>
-  </form>
-  {% if error %}
-    <p class="message error">{{ error }}</p>
-  {% endif %}
-  {% if success %}
-    <p class="message success">{{ success }}</p>
-  {% endif %}
-  <!-- Başarılı işlemde otomatik indirme gerçekleşir, ayrı bir indirme linkine gerek yok -->
+  <div class="wrap">
+    <header>
+      <h1>Excel → SEO Meta Üretici</h1>
+      <p>IdeaSoft ürün Excel’ini yükle; ana ürünler için <strong>title</strong>, <strong>description</strong>, <strong>keywords</strong> otomatik oluşsun.</p>
+    </header>
+
+    <div class="card">
+      <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data">
+        <!-- gizli gerçek input -->
+        <input id="fileInput" class="hidden" type="file" name="file" accept=".xlsx" />
+
+        <div id="dropZone" class="drop" tabindex="0" role="button" aria-label="Excel dosyasını sürükleyip bırakın veya tıklayın">
+          <!-- basit svg ikon -->
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path stroke-width="1.4" d="M3 15v4a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4"/>
+            <path stroke-width="1.4" d="M12 3v14M12 3l4 4M12 3 8 7"/>
+          </svg>
+          <p class="title">Dosyanı sürükleyip bırak ya da tıkla</p>
+          <p class="hint">Sadece .xlsx kabul edilir • Önerilen en fazla 50&nbsp;MB</p>
+
+          <div class="btns" style="margin-top:10px">
+            <button type="button" id="browseBtn" class="btn">Bilgisayardan seç</button>
+            <button type="submit" id="processBtn" class="btn primary">İşle ve İndir</button>
+          </div>
+
+          <div id="chosen" class="meta hidden">
+            <div id="fileName">Dosya seçilmedi</div>
+            <div id="fileSize">0 KB</div>
+          </div>
+
+          <div id="loading" class="success hidden">
+            <span class="spinner"></span> İşleniyor… Dosyan hazır olduğunda tarayıcın otomatik indirecek.
+          </div>
+
+          <div id="errorBox" class="error hidden"></div>
+        </div>
+      </form>
+
+      <footer>
+        <span>Önemli: Yalnızca <em>ana ürün</em> satırları (rootProductStockCode = 0) işlenir; mevcut dolu meta alanlara dokunulmaz.</span>
+      </footer>
+    </div>
+  </div>
+
+  <script>
+    (function(){
+      const form = document.getElementById('uploadForm');
+      const drop = document.getElementById('dropZone');
+      const input = document.getElementById('fileInput');
+      const browseBtn = document.getElementById('browseBtn');
+      const processBtn = document.getElementById('processBtn');
+      const chosen = document.getElementById('chosen');
+      const fileName = document.getElementById('fileName');
+      const fileSize = document.getElementById('fileSize');
+      const loading = document.getElementById('loading');
+      const errorBox = document.getElementById('errorBox');
+
+      const MAX = 50 * 1024 * 1024; // 50 MB
+      function showError(msg){
+        errorBox.textContent = msg;
+        errorBox.classList.remove('hidden');
+        loading.classList.add('hidden');
+      }
+      function clearError(){ errorBox.classList.add('hidden'); }
+
+      function formatBytes(b){
+        if(b === 0) return '0 B';
+        const u = ['B','KB','MB','GB']; const i = Math.floor(Math.log(b)/Math.log(1024));
+        return (b/Math.pow(1024,i)).toFixed(1)+' '+u[i];
+      }
+
+      function setChosen(file){
+        if(!file){ chosen.classList.add('hidden'); return; }
+        fileName.textContent = file.name;
+        fileSize.textContent = formatBytes(file.size);
+        chosen.classList.remove('hidden');
+      }
+
+      function validate(file){
+        clearError();
+        if(!file){ showError('Lütfen bir .xlsx dosyası seçin.'); return false; }
+        if(!file.name.toLowerCase().endsWith('.xlsx')){
+          showError('Sadece .xlsx uzantılı Excel dosyaları kabul edilir.'); return false;
+        }
+        if(file.size > MAX){
+          showError('Dosya çok büyük. Lütfen 50 MB altı bir .xlsx yükleyin.'); return false;
+        }
+        return true;
+      }
+
+      // input üzerinden seçim
+      browseBtn.addEventListener('click', () => input.click());
+      input.addEventListener('change', () => {
+        const file = input.files[0];
+        setChosen(file);
+      });
+
+      // drag & drop
+      ['dragenter','dragover'].forEach(evt => {
+        drop.addEventListener(evt, e => {
+          e.preventDefault(); e.stopPropagation();
+          drop.classList.add('dragover');
+        });
+      });
+      ['dragleave','drop'].forEach(evt => {
+        drop.addEventListener(evt, e => {
+          e.preventDefault(); e.stopPropagation();
+          drop.classList.remove('dragover');
+        });
+      });
+      drop.addEventListener('drop', e => {
+        const file = e.dataTransfer.files[0];
+        if(!validate(file)) return;
+        input.files = e.dataTransfer.files; // form’a bağla
+        setChosen(file);
+      });
+      // tıklayınca da input açılsın
+      drop.addEventListener('click', () => input.click());
+
+      // form gönderimi
+      form.addEventListener('submit', (e) => {
+        const file = input.files[0];
+        if(!validate(file)){ e.preventDefault(); return; }
+        // indirme başlayacağı için kullanıcıya görsel geri bildirim:
+        loading.classList.remove('hidden');
+        processBtn.disabled = true;
+        browseBtn.disabled = true;
+      });
+    })();
+  </script>
 </body>
 </html>
